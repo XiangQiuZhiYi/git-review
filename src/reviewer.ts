@@ -1,0 +1,231 @@
+import * as vscode from 'vscode'
+import * as fs from 'fs'
+import * as path from 'path'
+
+export interface ReviewResult {
+  status: 'error' | 'warning' | 'success'
+  summary: string
+  issues: Issue[]
+}
+
+export interface Issue {
+  severity: 'error' | 'warning' | 'info'
+  type: string
+  file: string
+  line?: string
+  message: string
+  suggestion?: string
+  code?: string  // 代码片段（可选）
+}
+
+export async function reviewCodeWithCopilot(
+  diff: string,
+  context: vscode.ExtensionContext
+): Promise<ReviewResult | null> {
+  try {
+    // 选择 Copilot 模型
+    const config = vscode.workspace.getConfiguration('gitCopilotReview')
+    const modelPreference = config.get<string>('copilotModel', 'auto')
+
+    let modelSelector: vscode.LanguageModelChatSelector = { vendor: 'copilot' }
+
+    if (modelPreference !== 'auto') {
+      modelSelector = {
+        vendor: 'copilot',
+        family: modelPreference,
+      }
+    }
+
+    const models = await vscode.lm.selectChatModels(modelSelector)
+
+    if (models.length === 0) {
+      vscode.window.showErrorMessage(
+        '未找到可用的 Copilot 模型。请确保：\n1. 已登录 GitHub Copilot\n2. 订阅处于活跃状态\n3. 在设置中允许扩展使用语言模型'
+      )
+      return null
+    }
+
+    const [model] = models
+
+    // 构造审查提示词
+    const prompt = buildReviewPrompt(diff)
+
+    // 发送请求
+    const messages = [vscode.LanguageModelChatMessage.User(prompt)]
+
+    const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token)
+
+    // 收集响应
+    let fullText = ''
+    for await (const chunk of response.text) {
+      fullText += chunk
+    }
+
+    // 解析 JSON 结果
+    const result = parseReviewResult(fullText)
+    return result
+  } catch (error) {
+    if (error instanceof vscode.LanguageModelError) {
+      handleLanguageModelError(error)
+    } else {
+      console.error('审查失败:', error)
+      vscode.window.showErrorMessage(`审查失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
+    return null
+  }
+}
+
+function buildReviewPrompt(diff: string): string {
+  // 读取项目规范
+  const guidelines = getProjectGuidelines()
+
+  return `你是一个专业的代码审查助手。请分析以下 Git 提交的代码变更，检查是否存在问题。
+
+## 必须检查的项目
+
+### 1. 严重错误（🔴 必须修复）
+- 语法错误
+- 类型错误（TypeScript）
+- 明显的运行时错误（如未定义的变量、函数调用错误）
+- 空指针/undefined 访问风险
+- 死循环或性能问题
+- 敏感信息泄露（API key、密码等）
+- 删除了重要的功能代码
+
+### 2. 规范问题（🟡 建议修复）
+- 违反项目编码规范
+- 命名不规范
+- 缺少类型定义
+- 缺少必要的国际化翻译
+- 样式使用不当（未使用 CSS Modules）
+- 未遵循项目约定
+
+### 3. 代码质量（🟢 优化建议）
+- 代码重复
+- 逻辑可优化
+- 可读性问题
+- 缺少注释
+
+## 项目规范参考
+
+${guidelines}
+
+## 代码变更
+
+\`\`\`diff
+${diff}
+\`\`\`
+
+## 输出格式
+
+请严格按照以下 JSON 格式输出分析结果（不要包含任何其他文本）：
+
+\`\`\`json
+{
+  "status": "error | warning | success",
+  "summary": "简短总结",
+  "issues": [
+    {
+      "severity": "error | warning | info",
+      "type": "语法错误 | 类型错误 | 规范问题 | 优化建议",
+      "file": "文件路径",
+      "line": "行号（如果能识别）",
+      "message": "问题描述",
+      "suggestion": "修复建议"
+    }
+  ]
+}
+\`\`\`
+
+注意：
+- 如果有严重错误（🔴），status 必须为 "error"
+- 如果只有建议性问题（🟡🟢），status 为 "warning" 或 "success"
+- 关注实际的代码问题，不要过度苛刻
+- 如果代码变更看起来正常，可以返回 success，issues 为空数组
+- 输出必须是有效的 JSON，不要包含任何注释或额外文本`
+}
+
+function getProjectGuidelines(): string {
+  const guidelines: string[] = []
+
+  try {
+    const workspaceFolders = vscode.workspace.workspaceFolders
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+      return ''
+    }
+
+    const rootPath = workspaceFolders[0].uri.fsPath
+
+    // 读取核心规范
+    const coreGuidePath = path.join(rootPath, '.vscode/CORE_GUIDELINES.md')
+    if (fs.existsSync(coreGuidePath)) {
+      guidelines.push('## 核心必读规范\n\n' + fs.readFileSync(coreGuidePath, 'utf-8'))
+    }
+
+    // 读取项目规范
+    const projectGuidePath = path.join(rootPath, '.vscode/PROJECT_GUIDE.md')
+    if (fs.existsSync(projectGuidePath)) {
+      guidelines.push('## 项目开发规范\n\n' + fs.readFileSync(projectGuidePath, 'utf-8'))
+    }
+
+    // 读取 Copilot 指令
+    const copilotPath = path.join(rootPath, '.github/copilot-instructions.md')
+    if (fs.existsSync(copilotPath)) {
+      guidelines.push('## Copilot 开发指引\n\n' + fs.readFileSync(copilotPath, 'utf-8'))
+    }
+  } catch (error) {
+    console.error('读取项目规范失败:', error)
+  }
+
+  return guidelines.length > 0 ? guidelines.join('\n\n---\n\n') : '无特定项目规范'
+}
+
+function parseReviewResult(text: string): ReviewResult {
+  try {
+    // 尝试提取 JSON 代码块
+    const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/)
+    const jsonText = jsonMatch ? jsonMatch[1] : text
+
+    const result = JSON.parse(jsonText.trim())
+
+    // 验证结果格式
+    if (!result.status || !result.summary) {
+      throw new Error('Invalid result format')
+    }
+
+    return {
+      status: result.status,
+      summary: result.summary,
+      issues: result.issues || [],
+    }
+  } catch (error) {
+    console.error('解析审查结果失败:', error)
+    console.log('原始响应:', text)
+
+    // 返回默认结果
+    return {
+      status: 'success',
+      summary: '解析审查结果失败，但代码可能没有明显问题',
+      issues: [],
+    }
+  }
+}
+
+function handleLanguageModelError(error: vscode.LanguageModelError) {
+  console.error('Language Model Error:', error.message, error.code)
+
+  // 使用字符串比较错误代码
+  if (error.code === 'NoPermissions') {
+    vscode.window.showErrorMessage(
+      '❌ 未授权使用 Copilot\n\n请在设置中允许扩展使用语言模型：\n设置 → 扩展 → GitHub Copilot → 允许扩展使用'
+    )
+  } else if (error.code === 'Blocked') {
+    vscode.window.showErrorMessage('❌ 请求被阻止\n\n可能触发了内容过滤策略，请修改代码后重试')
+  } else if (error.code === 'NotFound') {
+    vscode.window.showErrorMessage(
+      '❌ 未找到 Copilot 模型\n\n请确保：\n1. 已安装 GitHub Copilot 扩展\n2. 已登录 GitHub 账号\n3. 订阅处于活跃状态'
+    )
+  } else {
+    vscode.window.showErrorMessage(`❌ Copilot 错误: ${error.message}`)
+  }
+}

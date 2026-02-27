@@ -1,0 +1,131 @@
+{
+  "name": "git-copilot-review",
+  "displayName": "Git Copilot Review",
+  "description": "使用 GitHub Copilot 进行 Git 提交前的智能代码审查",
+  "version": "1.0.0",
+  "publisher": "Zhi-Yi",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Linters",
+    "Other"
+  ],
+  "keywords": [
+    "git",
+    "copilot",
+    "code review",
+    "ai",
+    "commit"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "git-copilot-review.reviewChanges",
+        "title": "AI 代码审查",
+        "icon": "$(search-fuzzy)"
+      },
+      {
+        "command": "git-copilot-review.commitWithReview",
+        "title": "AI 审查并提交",
+        "icon": "$(check)"
+      },
+      {
+        "command": "git-copilot-review.enableAutoReview",
+        "title": "启用自动代码审查"
+      },
+      {
+        "command": "git-copilot-review.disableAutoReview",
+        "title": "禁用自动代码审查"
+      },
+      {
+        "command": "git-copilot-review.showExternalReview",
+        "title": "显示外部审查结果 (Git Hook)"
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "git-copilot-review.reviewChanges",
+          "group": "navigation",
+          "when": "scmProvider == git"
+        },
+        {
+          "command": "git-copilot-review.commitWithReview",
+          "group": "navigation",
+          "when": "scmProvider == git && config.gitCopilotReview.autoReviewOnCommit"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "git-copilot-review.commitWithReview",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "scmProvider == git && scmRepository && !scmInputIsInCommentMode"
+      }
+    ],
+    "configuration": {
+      "title": "Git Copilot Review",
+      "properties": {
+        "gitCopilotReview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "是否启用 AI 代码审查"
+        },
+        "gitCopilotReview.autoReviewOnCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "提交前自动进行代码审查"
+        },
+        "gitCopilotReview.blockOnError": {
+          "type": "boolean",
+          "default": true,
+          "description": "发现严重错误时阻止提交"
+        },
+        "gitCopilotReview.blockOnWarning": {
+          "type": "boolean",
+          "default": false,
+          "description": "发现规范问题时阻止提交"
+        },
+        "gitCopilotReview.copilotModel": {
+          "type": "string",
+          "enum": [
+            "gpt-4o",
+            "gpt-3.5-turbo",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "Copilot 模型选择"
+        },
+        "gitCopilotReview.maxDiffSize": {
+          "type": "number",
+          "default": 500000,
+          "description": "最大 diff 大小（字节），超过则跳过审查"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
