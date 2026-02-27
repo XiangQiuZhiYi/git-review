@@ -289,7 +289,7 @@ function escapeHtml(unsafe: string): string {
  * @returns true 表示强制提交，false 表示取消提交
  */
 export async function showExternalReviewResults(
-  results: any[],
+  results: ReviewResult,
   diff: string,
   commitMessage: string
 ): Promise<boolean> {

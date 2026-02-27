@@ -1,6 +1,9 @@
 import * as vscode from 'vscode'
 import * as fs from 'fs'
 import * as path from 'path'
+import * as https from 'https'
+import * as http from 'http'
+import { URL } from 'url'
 
 export interface ReviewResult {
   status: 'error' | 'warning' | 'success'
@@ -210,6 +213,207 @@ function parseReviewResult(text: string): ReviewResult {
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────
+// OpenAI / Qwen 兼容接口调用（供 Git Hook 路径使用）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 读取指定仓库目录中的项目规范文档
+ * (.github/copilot-instructions.md + .github/skills/)
+ */
+function getProjectGuidelinesForRepo(repoPath: string): { main: string; skills: string } {
+  let main = ''
+  let skills = ''
+
+  try {
+    const copilotPath = path.join(repoPath, '.github/copilot-instructions.md')
+    if (fs.existsSync(copilotPath)) {
+      main = fs.readFileSync(copilotPath, 'utf-8')
+    }
+  } catch (_) { /* ignore */ }
+
+  try {
+    const skillDirs = [
+      'i18n-bilingual', 'drawer-components', 'form-drawer-submit',
+      'confirmation-modal', 'table-filter-config', 'api-integration',
+    ]
+    const skillDocs: string[] = []
+    for (const dir of skillDirs) {
+      const skillFile = path.join(repoPath, '.github/skills', dir, 'SKILL.md')
+      if (fs.existsSync(skillFile)) {
+        skillDocs.push(`### ${dir}\n${fs.readFileSync(skillFile, 'utf-8')}\n`)
+      }
+    }
+    skills = skillDocs.join('\n---\n\n')
+  } catch (_) { /* ignore */ }
+
+  return { main, skills }
+}
+
+/**
+ * 使用 Node.js 内置 https/http 模块发起 OpenAI 兼容 API POST 请求
+ */
+function httpPost(url: string, body: object, apiKey: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url)
+    const isHttps = parsed.protocol === 'https:'
+    const transport = isHttps ? https : http
+    const bodyStr = JSON.stringify(body)
+
+    const options: https.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    }
+
+    const req = transport.request(options, (res) => {
+      let data = ''
+      res.on('data', (chunk) => { data += chunk })
+      res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(data)
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}: ${data}`))
+        }
+      })
+    })
+
+    req.on('error', reject)
+    req.setTimeout(90000, () => {
+      req.destroy(new Error('Request timeout (90s)'))
+    })
+    req.write(bodyStr)
+    req.end()
+  })
+}
+
+/**
+ * 使用 OpenAI / Qwen 兼容接口审查代码（供 Git Hook 路径调用）
+ * @param diff      staged diff 内容
+ * @param repoPath  仓库根目录，用于读取项目规范
+ */
+export async function reviewCodeWithOpenAI(
+  diff: string,
+  repoPath: string
+): Promise<ReviewResult | null> {
+  const config = vscode.workspace.getConfiguration('gitCopilotReview')
+
+  // 从 VSCode 设置中读取 API 配置
+  const apiKey = config.get<string>('openaiApiKey', '')
+  const baseURL = (
+    config.get<string>('openaiBaseUrl', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+  ).replace(/\/$/, '')
+  const model = config.get<string>('openaiModel', 'qwen3-coder-plus')
+
+  if (!apiKey) {
+    // API Key 未设置，由调用方（extension.ts）负责提示用户
+    return null
+  }
+
+  // 读取仓库内的规范文档
+  const { main: projectGuidelines, skills: skillsGuidelines } = getProjectGuidelinesForRepo(repoPath)
+
+  const systemPrompt =
+    '你是一个专业的代码审查助手，擅长发现代码中的错误和潜在问题。请严格以 JSON 格式输出，不要包含任何 markdown 代码块或额外文本。'
+
+  const userPrompt = `你是一个专业的代码审查助手。请分析以下 Git 提交的代码变更，检查是否存在以下问题：
+
+## 项目规范文档
+
+${projectGuidelines || '（无项目规范文档）'}
+
+## 项目开发技能规范
+
+${skillsGuidelines || '（无技能规范文档）'}
+
+## 必须检查的项目
+
+### 1. 严重错误（🔴 必须修复）
+- 语法错误 / 意外删除
+- 未闭合的标签或括号 / 意外标签
+- 类型错误（TypeScript）
+- 明显的运行时错误（未定义变量、函数调用错误）
+- 空指针/undefined 访问风险
+- 死循环或性能问题
+- 敏感信息泄露（API key、密码等）
+
+### 2. 规范问题（🟡 建议修复）
+- 违反项目编码规范
+- 命名不规范
+- 缺少类型定义（TypeScript interface/type）
+- 缺少必要的国际化翻译
+- 样式使用不当（未使用 CSS Modules）
+- 未遵循 skills 中定义的最佳实践
+
+### 3. 代码质量（🟢 优化建议）
+- 代码重复 / 逻辑可优化 / 可读性问题 / 缺少注释
+
+## 代码变更
+
+\`\`\`diff
+${diff}
+\`\`\`
+
+请严格输出以下 JSON 对象（不要包含 markdown 代码块）：
+
+{
+  "status": "error | warning | success",
+  "summary": "简短总结",
+  "issues": [
+    {
+      "severity": "error | warning | info",
+      "type": "语法错误 | 类型错误 | 规范问题 | 优化建议",
+      "file": "文件路径",
+      "line": "行号（如可识别）",
+      "message": "问题描述",
+      "suggestion": "修复建议"
+    }
+  ]
+}
+
+注意：严重错误时 status 为 "error"；仅建议时为 "warning" 或 "success"；代码正常时返回 success + 空 issues 数组。`
+
+  try {
+    const requestBody = {
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+    }
+
+    const responseText = await httpPost(`${baseURL}/chat/completions`, requestBody, apiKey)
+    const responseJson = JSON.parse(responseText)
+    const content: string = responseJson.choices?.[0]?.message?.content ?? ''
+
+    return parseReviewResult(content)
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error)
+    console.error('[AI审查] OpenAI 调用失败:', errMsg)
+
+    if (errMsg.includes('timeout')) {
+      vscode.window.showErrorMessage('❌ AI 审查超时（90s），请检查网络后重试')
+    } else if (errMsg.includes('401')) {
+      vscode.window.showErrorMessage('❌ API Key 无效，请检查 gitCopilotReview.openaiApiKey 配置')
+    } else {
+      vscode.window.showErrorMessage(`❌ AI 审查失败: ${errMsg}`)
+    }
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Copilot 错误处理
+// ─────────────────────────────────────────────────────────────
 
 function handleLanguageModelError(error: vscode.LanguageModelError) {
   console.error('Language Model Error:', error.message, error.code)

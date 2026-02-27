@@ -1,5 +1,5 @@
 {
-  "name": "git-copilot-review",
+  "name": "git-review-view",
   "displayName": "Git Copilot Review",
   "description": "使用 GitHub Copilot 进行 Git 提交前的智能代码审查",
   "version": "1.0.0",
@@ -107,6 +107,21 @@
           "type": "number",
           "default": 500000,
           "description": "最大 diff 大小（字节），超过则跳过审查"
+        },
+        "gitCopilotReview.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**OpenAI / Qwen 兑容接口的 API Key**\n\n安装插件后，在此处填入您的 API Key 以启用 AI 代码审查功能。\n\n例如：`sk-xxxxxxxxxxxxxxxx`"
+        },
+        "gitCopilotReview.openaiBaseUrl": {
+          "type": "string",
+          "default": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          "markdownDescription": "**OpenAI 兑容接口的 Base URL**\n\n默认使用阿里云百练 Qwen 接口，如需使用其他接口（如 OpenAI、DeepSeek）可修改此项。"
+        },
+        "gitCopilotReview.openaiModel": {
+          "type": "string",
+          "default": "qwen3-coder-plus",
+          "markdownDescription": "**使用的模型名称**\n\n例如：`qwen3-coder-plus`、`deepseek-coder`、`gpt-4o`"
         }
       }
     }

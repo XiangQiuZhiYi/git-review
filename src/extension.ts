@@ -1,6 +1,6 @@
 import * as vscode from 'vscode'
 import { GitExtension, Repository } from './git'
-import { reviewCodeWithCopilot, ReviewResult } from './reviewer'
+import { reviewCodeWithCopilot, reviewCodeWithOpenAI, ReviewResult } from './reviewer'
 import { showReviewResults, showExternalReviewResults } from './ui'
 import { readFileSync, writeFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
@@ -251,33 +251,80 @@ function isCurrentWorkspace(repositoryPath: string): boolean {
 
 // 处理来自 Git Hook 的外部调用
 async function handleExternalReview(context: vscode.ExtensionContext) {
-  const TEMP_RESULT_FILE = join(tmpdir(), 'ai-review-result.json')
+  const TEMP_REQUEST_FILE = join(tmpdir(), 'ai-review-request.json')
   const TEMP_DECISION_FILE = join(tmpdir(), 'ai-review-decision.json')
 
   try {
-    // 读取临时文件中的审查结果
-    if (!existsSync(TEMP_RESULT_FILE)) {
-      console.log('[AI审查][handleExternalReview] 未找到审查结果文件')
-      vscode.window.showErrorMessage('❌ 未找到审查结果文件')
+    // 读取临时文件中的请求数据
+    if (!existsSync(TEMP_REQUEST_FILE)) {
+      console.log('[AI审查][handleExternalReview] 未找到审查请求文件')
+      vscode.window.showErrorMessage('❌ 未找到审查请求文件')
       return
     }
 
-    const data = JSON.parse(readFileSync(TEMP_RESULT_FILE, 'utf-8'))
-    const { results, diff, commitMessage, repositoryPath } = data
+    const data = JSON.parse(readFileSync(TEMP_REQUEST_FILE, 'utf-8'))
+    const { diff, commitMessage, repositoryPath } = data
     console.log('[AI审查][handleExternalReview] repositoryPath：', repositoryPath)
 
     // 验证仓库路径是否匹配当前窗口的工作区
     if (repositoryPath && !isCurrentWorkspace(repositoryPath)) {
-      console.log(`[AI审查][handleExternalReview] 审查结果属于其他工作区 (${repositoryPath})，当前窗口跳过处理`)
+      console.log(`[AI审查][handleExternalReview] 审查请求属于其他工作区 (${repositoryPath})，当前窗口跳过处理`)
       return  // 不删除文件，让正确的窗口来处理
     }
 
-    // 确认属于当前工作区，立即删除临时结果文件，避免重复处理
+    // 确认属于当前工作区，立即删除临时请求文件，避免重复处理
     const fs = require('fs')
-    fs.unlinkSync(TEMP_RESULT_FILE)
-    console.log('[AI审查][handleExternalReview] 已删除临时结果文件，开始展示 Webview')
+    fs.unlinkSync(TEMP_REQUEST_FILE)
+    console.log('[AI审查][handleExternalReview] 已删除临时请求文件，开始 AI 分析...')
 
-    // 使用 Webview 展示结果
+    // 检查 API Key 是否已配置
+    const apiKey = vscode.workspace.getConfiguration('gitCopilotReview').get<string>('openaiApiKey', '')
+    if (!apiKey) {
+      const action = await vscode.window.showWarningMessage(
+        '⚠️ 未设置 AI 审查 API Key，无法进行代码审查',
+        { modal: true, detail: '请前往 VSCode 设置配置 gitCopilotReview.openaiApiKey，或选择跳过审查直接提交。' },
+        '直接提交',
+        '去设置 API Key'
+      )
+      if (action === '直接提交') {
+        writeFileSync(TEMP_DECISION_FILE, JSON.stringify({ action: 'forceCommit', timestamp: Date.now() }))
+      } else {
+        if (action === '去设置 API Key') {
+          vscode.commands.executeCommand('workbench.action.openSettings', 'gitCopilotReview.openaiApiKey')
+        }
+        writeFileSync(TEMP_DECISION_FILE, JSON.stringify({ action: 'cancel', timestamp: Date.now() }))
+      }
+      return
+    }
+
+    // 在 VSCode 扩展内调用 OpenAI / Qwen API 进行代码审查
+    vscode.window.showInformationMessage('🤖 正在调用 AI 进行代码审查...')
+    const results = await reviewCodeWithOpenAI(diff, repositoryPath)
+
+    if (!results) {
+      // reviewCodeWithOpenAI 内部已弹出错误提示，此处给用户机会选择是否仍要提交
+      const action = await vscode.window.showWarningMessage(
+        '❌ AI 审查失败，是否仍要提交？',
+        { modal: true },
+        '直接提交',
+        '取消提交'
+      )
+      writeFileSync(TEMP_DECISION_FILE, JSON.stringify({
+        action: action === '直接提交' ? 'forceCommit' : 'cancel',
+        timestamp: Date.now()
+      }))
+      return
+    }
+
+    // 没有发现任何问题，直接通过并提交
+    const hasIssues = results.issues && results.issues.length > 0
+    if (!hasIssues || results.status === 'success') {
+      vscode.window.showInformationMessage('✅ AI 代码审查通过')
+      writeFileSync(TEMP_DECISION_FILE, JSON.stringify({ action: 'forceCommit', timestamp: Date.now() }))
+      return
+    }
+
+    // 有问题时使用 Webview 展示结果
     const decision = await showExternalReviewResults(results, diff, commitMessage)
     console.log('[AI审查][handleExternalReview] 用户决策:', decision)
 
@@ -287,9 +334,9 @@ async function handleExternalReview(context: vscode.ExtensionContext) {
       timestamp: Date.now()
     }))
   } catch (error) {
-    vscode.window.showErrorMessage(`处理审查结果失败: ${error}`)
+    vscode.window.showErrorMessage(`处理审查请求失败: ${error}`)
     // 写入取消决定
-    writeFileSync(TEMP_DECISION_FILE, JSON.stringify({
+    writeFileSync(join(tmpdir(), 'ai-review-decision.json'), JSON.stringify({
       action: 'cancel',
       timestamp: Date.now()
     }))
@@ -298,16 +345,16 @@ async function handleExternalReview(context: vscode.ExtensionContext) {
 
 // 启动文件监听器，检测 Git Hook 创建的临时文件
 function startFileWatcher(context: vscode.ExtensionContext) {
-  const TEMP_RESULT_FILE = join(tmpdir(), 'ai-review-result.json')
+  const TEMP_REQUEST_FILE = join(tmpdir(), 'ai-review-request.json')
   let isProcessing = false
   
   // 每秒检查一次临时文件
   const interval = setInterval(async () => {
-    if (existsSync(TEMP_RESULT_FILE) && !isProcessing) {
+    if (existsSync(TEMP_REQUEST_FILE) && !isProcessing) {
       try {
         // 先读取文件，检查是否属于当前工作区窗口（不设置 isProcessing，允许其他窗口也检查）
-        const rawContent = readFileSync(TEMP_RESULT_FILE, 'utf-8')
-        console.log('[AI审查][watcher] 检测到临时文件，内容前 200 字符:', rawContent.slice(0, 200))
+        const rawContent = readFileSync(TEMP_REQUEST_FILE, 'utf-8')
+        console.log('[AI审查][watcher] 检测到请求文件，内容前 200 字符:', rawContent.slice(0, 200))
         const data = JSON.parse(rawContent)
         const { repositoryPath } = data
         console.log('[AI审查][watcher] 文件中 repositoryPath:', repositoryPath)
@@ -319,7 +366,7 @@ function startFileWatcher(context: vscode.ExtensionContext) {
         }
 
         // 属于当前窗口，标记处理中，避免同一窗口重复触发
-        console.log('[AI审查][watcher] 检测到审查结果文件，准备展示...')
+        console.log('[AI审查][watcher] 检测到审查请求文件，准备处理...')
         isProcessing = true
         try {
           await handleExternalReview(context)
@@ -328,7 +375,7 @@ function startFileWatcher(context: vscode.ExtensionContext) {
         }
       } catch (e) {
         // 文件可能正在写入中，忽略此次检查，等待下一次
-        console.log('[AI审查][watcher] 读取审查结果文件出错，等待下次检查:', e)
+        console.log('[AI审查][watcher] 读取请求文件出错，等待下次检查:', e)
       }
     }
   }, 1000)
