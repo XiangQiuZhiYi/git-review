@@ -1,7 +1,7 @@
 {
   "name": "git-review-view",
-  "displayName": "Git Copilot Review",
-  "description": "使用 GitHub Copilot 进行 Git 提交前的智能代码审查",
+  "displayName": "Git Review View",
+  "description": "git copilot review view",
   "version": "1.0.0",
   "publisher": "Zhi-Yi",
   "engines": {
@@ -71,7 +71,7 @@
       }
     ],
     "configuration": {
-      "title": "Git Copilot Review",
+      "title": "Git Review View",
       "properties": {
         "gitCopilotReview.enabled": {
           "type": "boolean",
